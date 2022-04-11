@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -90,8 +91,10 @@ thread_init (void)
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
+  lock_init (&file_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  list_init (&all_exes);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -108,7 +111,7 @@ thread_start (void)
   /* Create the idle thread. */
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
-  thread_create ("idle", PRI_MIN, idle, &idle_started);
+  thread_create ("idle", PRI_MIN, idle, NULL, &idle_started);
 
   /* Start preemptive thread scheduling. */
   intr_enable ();
@@ -147,6 +150,71 @@ thread_print_stats (void)
           idle_ticks, kernel_ticks, user_ticks);
 }
 
+/* Some helper routines. */
+
+/**
+ * Get a thread's pointer by its tid. 
+ * If thread isn't in all_list, return NULL.
+ */
+struct thread *get_thread_by_tid(tid_t id)
+{
+  struct list_elem *e;
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+           e = list_next (e))
+  {
+    struct thread *t = list_entry (e, struct thread, elem);
+    if (t->tid == id)
+      return t;
+  }
+  return NULL;
+}
+
+/* Get a file's pointer by its fd. If not found, return NULL. */
+struct opened_file* get_of_by_fd(int fd)
+{
+  struct list_elem *e;
+  struct thread* cur = thread_current();
+  for (e = list_begin (&cur->all_files); e != list_end (&cur->all_files);
+           e = list_next (e))
+  {
+    struct opened_file* of = list_entry (e, struct opened_file, elem);
+    if (of->fd == fd)
+      return of;
+  }
+  return NULL;
+}
+
+/* Check if a thread thr is in all_list. */
+bool in_all_list(struct thread* thr)
+{
+  struct list_elem *e; 
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+            e = list_next (e))
+  {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      if (t == thr)
+      {
+        return true;
+      }
+  }
+  return false;
+}
+
+/* Check if the executable file_name is being run.
+   If not found, return NULL. */
+struct running_exe* is_running_exe(const char* file_name)
+{
+  struct list_elem *e; 
+  for (e = list_begin (&all_exes); e != list_end (&all_exes);
+            e = list_next (e))
+  {
+      struct running_exe* exe = list_entry (e, struct running_exe, elem);
+      if (strcmp(exe->name, file_name) == 0)
+        return exe;
+  }
+  return NULL;
+}
+
 /** Creates a new kernel thread named NAME with the given initial
    PRIORITY, which executes FUNCTION passing AUX as the argument,
    and adds it to the ready queue.  Returns the thread identifier
@@ -164,7 +232,7 @@ thread_print_stats (void)
    Priority scheduling is the goal of Problem 1-3. */
 tid_t
 thread_create (const char *name, int priority,
-               thread_func *function, void *aux) 
+               thread_func *function, struct thread* father, void *aux)  // Added a new argument "father".
 {
   struct thread *t;
   struct kernel_thread_frame *kf;
@@ -182,6 +250,20 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+
+  /* Set parent pointer & modify parent's child list. */
+  enum intr_level old_level;
+  t->parent_proc = father;
+  old_level = intr_disable ();
+  if (father != NULL)
+  {
+    struct child_record* rec = malloc(sizeof(struct child_record));
+    sema_init(&rec->sema_finish, 0);
+    rec->tid = tid;
+    rec->exit_status = -1;
+    list_push_back(&father->child_list, &rec->elem);    
+  }
+  intr_set_level (old_level);    
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -281,6 +363,7 @@ void
 thread_exit (void) 
 {
   ASSERT (!intr_context ());
+  struct thread* cur = thread_current();
 
 #ifdef USERPROG
   process_exit ();
@@ -463,6 +546,12 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+  t->load_success = false;
+
+  list_init(&t->child_list);
+  list_init(&t->all_files);
+  sema_init(&t->sema_load, 0);
+  t->fd_to_alloc = 2;
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);

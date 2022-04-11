@@ -17,17 +17,38 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h" // want to use timer_sleep()
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+
+/* For lab2 task 5.*/
+void deny_writes_to_exe(const char* file_name)
+{
+  struct running_exe* exe = is_running_exe(file_name);
+  if (exe == NULL)  // Add a struct to the global list all_exes.
+  {            
+    struct file* f = filesys_open(file_name);
+    ASSERT(f != NULL);
+    exe = malloc(sizeof(struct running_exe));
+    exe->f = f;
+    exe->times = 1;
+    strlcpy(exe->name, file_name, strlen(file_name) + 1);
+    file_deny_write(f);
+    list_push_back(&all_exes, &exe->elem);          
+  }
+  else  // Modify the struct.
+    exe->times += 1;
+}
 
 /** Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *file_name)  // file_name = program name + args
 {
+  struct thread* cur = thread_current();
   char *fn_copy;
   tid_t tid;
 
@@ -38,8 +59,17 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  char* tmp_save_ptr;
+  char file_name_copy[60]; 
+  strlcpy(file_name_copy, file_name, strlen(file_name) + 1);
+  char* real_file_name = strtok_r (file_name_copy, " ", &tmp_save_ptr);
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  enum intr_level old_level;
+  old_level = intr_disable ();
+  tid = thread_create (real_file_name, PRI_DEFAULT, start_process, cur, fn_copy);
+  intr_set_level (old_level);  
+
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
   return tid;
@@ -50,6 +80,7 @@ process_execute (const char *file_name)
 static void
 start_process (void *file_name_)
 {
+  struct thread* cur = thread_current();
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
@@ -59,12 +90,35 @@ start_process (void *file_name_)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
+
+  char* tmp_save_ptr;
+  char file_name_copy[60]; 
+  strlcpy(file_name_copy, file_name, strlen(file_name) + 1);
+  char* real_file_name = strtok_r (file_name_copy, " ", &tmp_save_ptr);
   success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
+  /* Deny writes to executables in use. */
+  if (success)
+  {
+    lock_acquire(&file_lock);
+    deny_writes_to_exe(real_file_name);
+    lock_release(&file_lock);    
+  }
+
+  /* If load failed, set load_success to false, signal parent, and quit. */
+  palloc_free_page (file_name);  // 之前是在process_execute里palloc的file_name，现在需要free掉
   if (!success) 
+  {
+    sema_up(&thread_current()->parent_proc->sema_load);   
     thread_exit ();
+  }
+  
+  /* Set load_success to true, signal parent. */
+  enum intr_level old_level;
+  old_level = intr_disable();
+  thread_current()->parent_proc->load_success = true;  
+  sema_up(&thread_current()->parent_proc->sema_load);  
+  intr_set_level(old_level);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -86,9 +140,36 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid UNUSED)
 {
-  return -1;
+  ASSERT(child_tid > 0);
+
+  // 1. Check if tid refers to a direct child of current process.
+  struct thread* cur = thread_current();
+  struct list_elem *e;
+  bool found = false;
+  struct child_record* rec;
+  for (e = list_begin (&cur->child_list); e != list_end (&cur->child_list);
+           e = list_next (e))
+  {
+    rec = list_entry (e, struct child_record, elem);
+    if (rec->tid == child_tid)
+    {
+      found = true;
+      break;
+    }
+  }
+  if (found == false)  // Not a direct child. Return -1.
+    return -1;  
+
+  // 2. Wait for child process to terminate.
+  sema_down(&rec->sema_finish);
+
+  // 3. Retrieve the exit status and free struct record.
+  int exit_status = rec->exit_status;
+  list_remove(&rec->elem);
+  free(rec);
+  return exit_status;  
 }
 
 /** Free the current process's resources. */
@@ -96,7 +177,27 @@ void
 process_exit (void)
 {
   struct thread *cur = thread_current ();
-  uint32_t *pd;
+  uint32_t *pd; 
+
+  /* Re-enable writes to the executable. */
+  struct running_exe* exe = is_running_exe(cur->name);
+  if (exe != NULL)
+  {
+    enum intr_level old_level;
+    old_level = intr_disable();
+    if (exe->times == 1)  // Should re-enable writes.
+    {
+      list_remove(&exe->elem);
+      if (!lock_held_by_current_thread(&file_lock))
+        lock_acquire(&file_lock);
+      file_close(exe->f);
+      lock_release(&file_lock);
+      free(exe);
+    }
+    else
+      exe->times -= 1;
+    intr_set_level(old_level);
+  } 
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -201,12 +302,27 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
                           bool writable);
 
+/** Check if a user addr is legal. */
+bool check_addr(void* user_addr)
+{
+  if (user_addr == NULL)
+    return false;
+  if (!is_user_vaddr(user_addr)) // Check if it's above PHYS_BASE
+    return false;
+  struct thread *t = thread_current ();
+  // Check if the memory is mapped.
+  if (pagedir_get_page(t->pagedir, user_addr) == NULL)
+    return false;
+  return true;
+}
+
+
 /** Loads an ELF executable from FILE_NAME into the current thread.
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
 bool
-load (const char *file_name, void (**eip) (void), void **esp) 
+load (const char *file_name, void (**eip) (void), void **esp) // file_name是包含文件名的整个字符串
 {
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
@@ -221,11 +337,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
     goto done;
   process_activate ();
 
+  char* tmp_save_ptr;
+  char file_name_copy[30]; 
+  strlcpy(file_name_copy, file_name, strlen(file_name) + 1);
+  char* real_file_name = strtok_r (file_name_copy, " ", &tmp_save_ptr);
+
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (real_file_name);
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", file_name);
+      printf ("load: %s: open failed\n", real_file_name);
       goto done; 
     }
 
@@ -304,6 +425,51 @@ load (const char *file_name, void (**eip) (void), void **esp)
   /* Set up stack. */
   if (!setup_stack (esp))
     goto done;
+  
+  // Set up if_->stack.
+  // file_name的格式：/bin/ls -l foo bar
+
+  char *token, *save_ptr;  
+  int total_len = 0;  // for alignment.
+  int cnt = 0; // how many arguments?
+
+  strlcpy(file_name_copy, file_name, strlen(file_name) + 1);
+
+  for (token = strtok_r (file_name_copy, " ", &save_ptr); token != NULL;
+       token = strtok_r (NULL, " ", &save_ptr))
+  {
+    int len = strlen(token);
+    total_len += (len + 1); // including '\0'
+    cnt += 1;
+    *esp -= (len + 1); // update stack pointer
+    strlcpy(*esp, token, strlen(token) + 1);  
+  }
+  // 此时参数在栈里的顺序应该是argv[0],argv[1],...argv[n-1]从高到低，和图上的相反
+  char* tmp = *esp; // tmp记录了argv[n-1]的起始位置
+
+  // do word-alignment & push null-pointer sentinel
+  int align_size = (4 - (total_len % 4)) % 4;
+  align_size += 4;
+  *esp -= align_size;
+  memset(*esp, 0, align_size);
+
+  // push argv[i]'s onto stack
+  for (int i = 0; i < cnt; i++)
+  {
+    *esp -= 4;
+    *(int*)(*esp) = tmp;//一开始tmp已经是字符串起点了，先push
+    while(*tmp != '\0') //
+      tmp++;    
+    tmp++;   
+  } 
+
+  tmp = *esp;
+  *esp -= 4;
+  *(int*)(*esp) = tmp; // push argv
+  *esp -= 4;
+  *(int*)(*esp) = cnt; // push argc
+  *esp -= 4;
+  *(int*)(*esp) = 0; // fake return addr
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;

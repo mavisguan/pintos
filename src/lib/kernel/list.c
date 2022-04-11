@@ -94,6 +94,7 @@ struct list_elem *
 list_end (struct list *list)
 {
   ASSERT (list != NULL);
+  void* res = &list->tail;
   return &list->tail;
 }
 

@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /** States in a thread's life cycle. */
 enum thread_status
@@ -23,6 +24,35 @@ typedef int tid_t;
 #define PRI_MIN 0                       /**< Lowest priority. */
 #define PRI_DEFAULT 31                  /**< Default priority. */
 #define PRI_MAX 63                      /**< Highest priority. */
+
+/**
+ * Struct to record exit status of each child.
+ * Stored in heap, always malloced by child and freed by parent. 
+ */
+struct child_record
+{
+  struct list_elem elem;
+  tid_t tid;
+  struct semaphore sema_finish;  // Semaphore to signal if child thread has terminated.
+  int exit_status;
+};
+
+struct opened_file
+{
+  struct file* f;
+  int fd;
+  struct list_elem elem;
+};
+
+struct running_exe
+{
+  struct file* f;
+  char name[30];
+  struct list_elem elem;
+  int times;
+};
+
+struct list all_exes;
 
 /** A kernel thread or user process.
 
@@ -93,6 +123,15 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /**< List element. */
 
+    /* Used for lab2. */
+    struct thread* parent_proc;  // Pointer to parent process.
+    struct list child_list;  // List of child_records.
+    bool load_success;  // Did the child load the ELF successfully?
+    struct semaphore sema_load;  // Semaphore modified by the child, to signal returning from load().
+
+    struct list all_files; // Record all the files that was opened in this process.
+    int fd_to_alloc;
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /**< Page directory. */
@@ -101,6 +140,14 @@ struct thread
     /* Owned by thread.c. */
     unsigned magic;                     /**< Detects stack overflow. */
   };
+
+/* Self-defined helper routines. */
+struct thread *get_thread_by_tid(tid_t id);
+bool in_all_list(struct thread* thr);
+struct opened_file* get_of_by_fd(int fd);
+struct running_exe* is_running_exe(const char* file_name);
+
+struct lock file_lock; // Used by syscall.c to ensure mutual exclusion.
 
 /** If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -114,7 +161,7 @@ void thread_tick (void);
 void thread_print_stats (void);
 
 typedef void thread_func (void *aux);
-tid_t thread_create (const char *name, int priority, thread_func *, void *);
+tid_t thread_create (const char *name, int priority, thread_func *, struct thread* father, void *);
 
 void thread_block (void);
 void thread_unblock (struct thread *);
