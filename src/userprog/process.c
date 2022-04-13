@@ -429,6 +429,11 @@ load (const char *file_name, void (**eip) (void), void **esp) // file_name是包
   // Set up if_->stack.
   // file_name的格式：/bin/ls -l foo bar
 
+  /* In order to prevent overflowing the page, 
+     the command line shouldn't be too long. */
+  if (strlen(file_name) > 450)
+    goto done;
+
   char *token, *save_ptr;  
   int total_len = 0;  // for alignment.
   int cnt = 0; // how many arguments?
@@ -458,7 +463,7 @@ load (const char *file_name, void (**eip) (void), void **esp) // file_name是包
   {
     *esp -= 4;
     *(int*)(*esp) = tmp;//一开始tmp已经是字符串起点了，先push
-    while(*tmp != '\0') //
+    while(*tmp != '\0')
       tmp++;    
     tmp++;   
   } 

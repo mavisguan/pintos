@@ -16,7 +16,7 @@
 
 static void syscall_handler (struct intr_frame *);
 
-int open (const char *file)  // TODO: now we assume all files are executables.
+int open (const char *file)  // Now we just assume that all files are executables.
 {
   struct file* f = filesys_open(file);
   struct thread* cur = thread_current();
@@ -159,6 +159,9 @@ void exit (int status)
     }
   }
 
+  /* 4. If file_lock was occupied by current thread, release the lock.  */
+  if (lock_held_by_current_thread(&file_lock))
+    lock_release(&file_lock);
   thread_exit ();
 }
 
