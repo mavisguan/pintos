@@ -4,6 +4,13 @@
 #include "lib/user/syscall.h"
 #include "lib/stdbool.h"
 
+#ifdef VM
+#include "vm/tables.h"
+#endif
+
+bool check_user_addr(const void* addr, unsigned size);
+bool check_valid_string(const char* str_start);
+
 void halt (void);
 void exit (int status);
 pid_t exec (const char *cmd_line);

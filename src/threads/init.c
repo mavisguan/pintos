@@ -37,6 +37,9 @@
 #include "filesys/filesys.h"
 #include "filesys/fsutil.h"
 #endif
+#ifdef VM
+#include "vm/tables.h"
+#endif
 
 /** Page directory with kernel mappings only. */
 uint32_t *init_page_dir;
@@ -127,6 +130,12 @@ pintos_init (void)
   filesys_init (format_filesys);
 #endif
 
+#ifdef VM
+  hash_init (&frame_table, frame_hash, frame_less, NULL);  /* Create hash table. */
+  lock_init (&frame_table_lock);
+  init_swap();
+#endif
+
   printf ("Boot complete.\n");
   
   if (*argv != NULL) {
@@ -137,6 +146,10 @@ pintos_init (void)
   }
 
   /* Finish up. */
+#ifdef VM
+  destroy_frame_table();
+  destroy_swap_table();
+#endif
   shutdown ();
   thread_exit ();
 }

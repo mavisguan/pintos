@@ -1,9 +1,23 @@
 #include "userprog/exception.h"
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 #include "userprog/gdt.h"
+#include "userprog/pagedir.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
+#include "threads/palloc.h"
+#include "filesys/file.h"
+#include "userprog/pagedir.h"
+#include "threads/malloc.h"
+#include "threads/vaddr.h"
+#include "userprog/syscall.h"
+#include "userprog/process.h"
+#define VM // remove later!
+#ifdef VM
+#include "vm/tables.h"
+#endif
 
 /** Number of page faults processed. */
 static long long page_fault_cnt;
@@ -108,7 +122,7 @@ kill (struct intr_frame *f)
     }
 }
 
-/** Page fault handler.  This is a skeleton that must be filled in
+/** .  This is a skeleton that must be filled in
    to implement virtual memory.  Some solutions to project 2 may
    also require modifying this code.
 
@@ -127,6 +141,7 @@ page_fault (struct intr_frame *f)
   bool user;         /**< True: access by user, false: access by kernel. */
   void *fault_addr;  /**< Fault address. */
 
+  bool success = true;
   /* Obtain faulting address, the virtual address that was
      accessed to cause the fault.  It may point to code or to
      data.  It is not necessarily the address of the instruction
@@ -148,15 +163,93 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
-  /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
-//   printf ("Page fault at %p: %s error %s page in %s context.\n",
-//           fault_addr,
-//           not_present ? "not present" : "rights violation",
-//           write ? "writing" : "reading",
-//           user ? "user" : "kernel");
-//   kill (f);
-   exit(-1);
+   /* 1. Decide if it's invalid access.
+      If page lies within kernel VM, or trying to write read-only 
+      page, terminate the process. */
+   void* upage = pg_round_down(fault_addr);  // get the beginning of user page.
+   if ((user && (upage >= PHYS_BASE)) || !not_present) 
+   {      
+      success = false;
+      goto done;
+   }
+   if (not_present)
+   {
+      // Look for SPT and load the page.
+      lock_acquire(&thread_current()->page_table_lock);
+      struct page* p = page_lookup(upage, &thread_current()->page_table);
+      lock_release(&thread_current()->page_table_lock);
+      if (p == NULL)  // Didn't have any data!
+      {
+        success = false;
+        goto done;
+      }
+      ASSERT(p->pagetype != IN_PHYS_MEM);      
+      // 2. Obtain a frame to store the page.
+      struct frame* frame;
+      void* kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+      lock_acquire(&frame_table_lock);
+      if (kpage == NULL)  // No frame is available, do eviction.
+      {         
+         frame = page_eviction();
+         lock_acquire(&frame->frame_entry_lock);    
+         kpage = ptov((uintptr_t)frame->paddr);
+         frame->vaddr = upage;
+         frame->thr = thread_current();
+         lock_release(&frame->frame_entry_lock);    
+      }
+      else  // use new frame.
+      {
+         frame = (struct frame*)malloc(sizeof(struct frame));   
+         lock_init(&frame->frame_entry_lock);   
+         lock_acquire(&frame->frame_entry_lock);    
+         frame->paddr = (void*)vtop(kpage);
+         frame->vaddr = upage;
+         frame->thr = thread_current();
+         lock_release(&frame->frame_entry_lock);
+         hash_insert(&frame_table, &frame->hash_elem);
+      }
+      lock_release(&frame_table_lock); 
+      ASSERT(kpage != NULL);
+      switch (p->pagetype)
+      {         
+         case IN_FILE:                  
+            pagedir_set_page(thread_current()->pagedir, upage, kpage, p->writable);  // writable=?        
+            // Load from file.
+            lock_acquire(&thread_current()->page_table_lock);  
+            p->pagetype = IN_PHYS_MEM;  
+            p->paddr = (void*)vtop(kpage);        
+            if (p->fileinfo.zeros < PGSIZE)
+            {
+               lock_acquire(&file_lock);               
+               file_read_at(p->fileinfo.f, kpage, PGSIZE - p->fileinfo.zeros, p->fileinfo.offset);
+               lock_release(&file_lock); 
+            }            
+            lock_release(&thread_current()->page_table_lock); 
+            // Set last [zeros] bytes to zero.
+            memset ((uint8_t *)kpage + PGSIZE - p->fileinfo.zeros, 0, p->fileinfo.zeros);     
+            break;
+         case ALL_ZEROS:                             
+            pagedir_set_page(thread_current()->pagedir, upage, kpage, true); 
+            memset (kpage, 0, PGSIZE); 
+            lock_acquire(&thread_current()->page_table_lock);  
+            p->pagetype = IN_PHYS_MEM;
+            p->paddr = (void*)vtop(kpage);
+            lock_release(&thread_current()->page_table_lock); 
+            break;
+         case IN_SWAP:
+            pagedir_set_page(thread_current()->pagedir, upage, kpage, true); 
+            lock_acquire(&thread_current()->page_table_lock);   
+            p->pagetype = IN_PHYS_MEM;   
+            p->paddr = (void*)vtop(kpage);  
+            lock_release(&thread_current()->page_table_lock);          
+            // load from swap.
+            read_from_swap(p->index, frame);            
+            break;
+         default:
+            break;
+      }
+   }    
+done:
+   if (!success)
+      exit(-1);
 }
-

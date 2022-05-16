@@ -5,6 +5,10 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/synch.h"
+#ifdef VM
+#include "vm/tables.h"
+#include "../lib/kernel/hash.h"
+#endif
 
 /** States in a thread's life cycle. */
 enum thread_status
@@ -131,6 +135,10 @@ struct thread
 
     struct list all_files; // Record all the files that was opened in this process.
     int fd_to_alloc;
+
+    /* Used for lab3.*/
+    struct hash page_table;  // Supplemental page table for this thread.
+    struct lock page_table_lock;  // Supplemental page table's lock.
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */

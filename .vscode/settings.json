@@ -3,6 +3,13 @@
         "*.inc": "c",
         "process.h": "c",
         "thread.h": "c",
-        "INIT.H": "cpp"
+        "INIT.H": "cpp",
+        "syscall.h": "c",
+        "exception.h": "c",
+        "tables.h": "c",
+        "filesys.h": "c",
+        "malloc.h": "c",
+        "ide.h": "c",
+        "hash.h": "c"
     }
 }

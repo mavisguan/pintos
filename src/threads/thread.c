@@ -12,9 +12,14 @@
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #include "threads/malloc.h"
+#include <hash.h>
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
+#ifdef VM
+#include "vm/tables.h"
+#endif
+
 
 /** Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
@@ -95,7 +100,7 @@ thread_init (void)
   list_init (&ready_list);
   list_init (&all_list);
   list_init (&all_exes);
-
+  
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
@@ -363,7 +368,6 @@ void
 thread_exit (void) 
 {
   ASSERT (!intr_context ());
-  struct thread* cur = thread_current();
 
 #ifdef USERPROG
   process_exit ();
@@ -547,7 +551,7 @@ init_thread (struct thread *t, const char *name, int priority)
   t->priority = priority;
   t->magic = THREAD_MAGIC;
   t->load_success = false;
-
+  
   list_init(&t->child_list);
   list_init(&t->all_files);
   sema_init(&t->sema_load, 0);

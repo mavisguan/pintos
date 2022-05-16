@@ -18,6 +18,10 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "devices/timer.h" // want to use timer_sleep()
+#include "vm/tables.h"
+#include "threads/malloc.h"
+
+#define VM  // remove later!
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -80,7 +84,6 @@ process_execute (const char *file_name)  // file_name = program name + args
 static void
 start_process (void *file_name_)
 {
-  struct thread* cur = thread_current();
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
@@ -322,7 +325,7 @@ bool check_addr(void* user_addr)
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
 bool
-load (const char *file_name, void (**eip) (void), void **esp) // file_name是包含文件名的整个字符串
+load (const char *file_name, void (**eip) (void), void **esp)  // file_name是包含文件名的整个字符串
 {
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
@@ -336,6 +339,12 @@ load (const char *file_name, void (**eip) (void), void **esp) // file_name是包
   if (t->pagedir == NULL) 
     goto done;
   process_activate ();
+
+#ifdef VM
+  /* Initialize supplemental page table. */
+  hash_init(&t->page_table, page_hash, page_less, NULL);  /* Create supplemental page table. */
+  lock_init(&t->page_table_lock);
+#endif
 
   char* tmp_save_ptr;
   char file_name_copy[30]; 
@@ -483,13 +492,13 @@ load (const char *file_name, void (**eip) (void), void **esp) // file_name是包
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
+  //file_close (file); // Don't close the file because we need to lazy-load later!  
   return success;
 }
 
 /** load() helpers. */
 
-static bool install_page (void *upage, void *kpage, bool writable);
+//bool install_page (void *upage, void *kpage, bool writable);
 
 /** Checks whether PHDR describes a valid, loadable segment in
    FILE and returns true if so, false otherwise. */
@@ -558,13 +567,14 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   ASSERT (pg_ofs (upage) == 0);
   ASSERT (ofs % PGSIZE == 0);
 
+  #ifndef VM
   file_seek (file, ofs);
   while (read_bytes > 0 || zero_bytes > 0) 
     {
       /* Calculate how to fill this page.
          We will read PAGE_READ_BYTES bytes from FILE
          and zero the final PAGE_ZERO_BYTES bytes. */
-      size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
+      size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE; // 每次最多只能读一个page那么多
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
       /* Get a page of memory. */
@@ -593,6 +603,38 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       upage += PGSIZE;
     }
   return true;
+  #else
+  struct thread* cur = thread_current();
+  while (read_bytes > 0 || zero_bytes > 0) 
+  {
+    /* Calculate how to fill this page.
+        We will read PAGE_READ_BYTES bytes from FILE
+        and zero the final PAGE_ZERO_BYTES bytes. */
+    size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
+    size_t page_zero_bytes = PGSIZE - page_read_bytes;
+
+    /* Modify supplemental page table. */
+    struct page* p = (struct page*)malloc(sizeof(struct page));
+    p->fileinfo.f = file;
+    p->fileinfo.offset = ofs;
+    p->fileinfo.zeros = page_zero_bytes;
+    p->vaddr = upage;
+    p->pagetype = IN_FILE;
+    p->paddr = NULL; 
+    p->writable = writable;
+    lock_acquire(&cur->page_table_lock);    
+    hash_insert(&cur->page_table, &p->hash_elem);  
+    lock_release(&cur->page_table_lock);
+    /* Advance. */
+    read_bytes -= page_read_bytes;
+    zero_bytes -= page_zero_bytes;
+    upage += PGSIZE;
+    ofs += page_read_bytes;
+  }
+  return true;
+
+  #endif
+  
 }
 
 /** Create a minimal stack by mapping a zeroed page at the top of
@@ -600,19 +642,16 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 static bool
 setup_stack (void **esp) 
 {
-  uint8_t *kpage;
-  bool success = false;
-
-  kpage = palloc_get_page (PAL_USER | PAL_ZERO);
-  if (kpage != NULL) 
-    {
-      success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
-      if (success)
-        *esp = PHYS_BASE;
-      else
-        palloc_free_page (kpage);
-    }
-  return success;
+  // lazy load. Modify SPT.
+  struct page* p = malloc(sizeof(struct page));
+  p->vaddr = ((uint8_t *) PHYS_BASE) - PGSIZE;
+  p->pagetype = ALL_ZEROS;
+  p->paddr = NULL;     
+  lock_acquire(&thread_current()->page_table_lock);
+  hash_insert(&thread_current()->page_table, &p->hash_elem);
+  lock_release(&thread_current()->page_table_lock);
+  *esp = PHYS_BASE;
+  return true;
 }
 
 /** Adds a mapping from user virtual address UPAGE to kernel
@@ -624,7 +663,7 @@ setup_stack (void **esp)
    with palloc_get_page().
    Returns true on success, false if UPAGE is already mapped or
    if memory allocation fails. */
-static bool
+bool
 install_page (void *upage, void *kpage, bool writable)
 {
   struct thread *t = thread_current ();

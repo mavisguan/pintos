@@ -13,6 +13,10 @@
 #include "filesys/filesys.h"
 #include "filesys/file.h"
 #include "devices/input.h"
+#include <hash.h>
+#ifdef VM
+#include "vm/tables.h"
+#endif
 
 static void syscall_handler (struct intr_frame *);
 
@@ -162,6 +166,16 @@ void exit (int status)
   /* 4. If file_lock was occupied by current thread, release the lock.  */
   if (lock_held_by_current_thread(&file_lock))
     lock_release(&file_lock);
+
+  /* 5. Free the thread's page_table & do page reclamation.*/
+  lock_acquire(&frame_table_lock);
+  hash_apply(&cur->page_table, reclaim_frame);  // TODO: check correctness.
+  lock_release(&frame_table_lock);
+  lock_acquire(&swap_lock);
+  hash_apply(&cur->page_table, free_swap_on_termination);
+  lock_release(&swap_lock);
+  destroy_page_table(&cur->page_table);
+  
   thread_exit ();
 }
 
@@ -205,9 +219,11 @@ bool check_user_addr(const void* addr, unsigned size)
 {
   if (!is_user_vaddr(addr + size - 1))
     exit(-1);
+#ifndef VM
   for (unsigned i = 0; i < size; i++)
     if (pagedir_get_page(thread_current()->pagedir, addr + i) == NULL)
       exit(-1);
+#endif
   return true;  
 }
 
