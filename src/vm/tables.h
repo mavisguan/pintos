@@ -23,7 +23,6 @@ struct frame
   void* vaddr;  // Virtual address.
   void* paddr;  // Physical address. (Key value)
   struct thread* thr;  // Which thread (process) held this frame?
-  bool pinned;  // The frame was pinned?
   struct lock frame_entry_lock;
 };
 
@@ -51,8 +50,6 @@ struct page
   bool writable;  // Indicate if the page is writable.
 };
 
-
-
 /* Returns a hash value for page p. */
 unsigned page_hash (const struct hash_elem *p_, void *aux UNUSED);
 unsigned frame_hash (const struct hash_elem *p_, void *aux UNUSED);
@@ -65,9 +62,11 @@ bool frame_less (const struct hash_elem *a_, const struct hash_elem *b_,
 
 /* Returns the page containing the given virtual address,
    or a null pointer if no such page exists. */
-struct page* page_lookup (const void *address, struct hash* page_table_addr);
-struct frame* frame_lookup (const void *address);
+struct page* page_lookup (void *address, struct hash* page_table_addr);
+struct frame* frame_lookup (void *address);
 
+/* Functions to free data structures when a thread terminates
+   or pintos is shutdown. */
 void destroy_page_table(struct hash* page_table_addr);
 void delete_page(struct hash_elem *e, void* aux);
 void destroy_frame_table(void);
@@ -88,10 +87,13 @@ struct lock swap_lock;
 block_sector_t allocated_swap_no;  // how many swap slots have been allocated?
 block_sector_t max_swap_no;
 
+/* Life cycle of swap space. */
 void init_swap(void);
-void read_from_swap(size_t index, struct frame* f);
-void write_to_swap(struct frame* f, struct page* p);
 void free_swap_on_termination(struct hash_elem *e, void* aux UNUSED);
 void destroy_swap_table(void);
+
+/* Functions to read from or write to swap space. */
+void read_from_swap(size_t index, struct frame* f);
+void write_to_swap(struct frame* f, struct page* p);
 
 #endif /**< vm/tables.h */

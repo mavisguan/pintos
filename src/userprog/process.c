@@ -21,8 +21,6 @@
 #include "vm/tables.h"
 #include "threads/malloc.h"
 
-#define VM  // remove later!
-
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
@@ -471,7 +469,7 @@ load (const char *file_name, void (**eip) (void), void **esp)  // file_name是�
   for (int i = 0; i < cnt; i++)
   {
     *esp -= 4;
-    *(int*)(*esp) = tmp;//一开始tmp已经是字符串起点了，先push
+    *(char**)(*esp) = tmp;//一开始tmp已经是字符串起点了，先push
     while(*tmp != '\0')
       tmp++;    
     tmp++;   
@@ -479,7 +477,7 @@ load (const char *file_name, void (**eip) (void), void **esp)  // file_name是�
 
   tmp = *esp;
   *esp -= 4;
-  *(int*)(*esp) = tmp; // push argv
+  *(char**)(*esp) = tmp; // push argv
   *esp -= 4;
   *(int*)(*esp) = cnt; // push argc
   *esp -= 4;
@@ -574,7 +572,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       /* Calculate how to fill this page.
          We will read PAGE_READ_BYTES bytes from FILE
          and zero the final PAGE_ZERO_BYTES bytes. */
-      size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE; // 每次最多只能读一个page那么多
+      size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
       /* Get a page of memory. */
@@ -613,7 +611,8 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
     size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
     size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-    /* Modify supplemental page table. */
+    /* Use lazy loading. Modify supplemental page table, 
+       recording metadata of the file. */
     struct page* p = (struct page*)malloc(sizeof(struct page));
     p->fileinfo.f = file;
     p->fileinfo.offset = ofs;
@@ -642,7 +641,8 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 static bool
 setup_stack (void **esp) 
 {
-  // lazy load. Modify SPT.
+  // Use lazy loading. Modify SPT, mark it as an all-zero page, 
+  // so the stack will be loaded into memory later upon a page-fault.
   struct page* p = malloc(sizeof(struct page));
   p->vaddr = ((uint8_t *) PHYS_BASE) - PGSIZE;
   p->pagetype = ALL_ZEROS;

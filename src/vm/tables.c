@@ -6,6 +6,7 @@
 #include "lib/random.h"
 #include "lib/kernel/bitmap.h"
 
+/* Basic functions needed to construct hash tables. */
 unsigned
 page_hash (const struct hash_elem *p_, void *aux UNUSED)
 {
@@ -43,7 +44,7 @@ frame_less (const struct hash_elem *a_, const struct hash_elem *b_,
 
 /* Returns the page containing the given virtual address,
    or a null pointer if no such page exists. */
-struct page* page_lookup (const void *address, struct hash* page_table_addr)
+struct page* page_lookup (void *address, struct hash* page_table_addr)
 {
   struct page p;
   struct hash_elem *e;
@@ -53,7 +54,7 @@ struct page* page_lookup (const void *address, struct hash* page_table_addr)
   return e != NULL ? hash_entry (e, struct page, hash_elem) : NULL;
 }
 
-struct frame* frame_lookup (const void *address)
+struct frame* frame_lookup (void *address)
 {
   struct frame f;
   struct hash_elem *e;
@@ -80,6 +81,7 @@ void destroy_frame_table()
   hash_destroy(&frame_table, delete_frame);
 }
 
+// Free the malloced struct frame.
 void delete_frame(struct hash_elem *e, void* aux UNUSED)
 {
   struct frame *f = hash_entry (e, struct frame, hash_elem);
@@ -99,25 +101,27 @@ void reclaim_frame(struct hash_elem *e, void* aux UNUSED)
   }
 }
 
-/* Choose a page to evict. 
-   Use some strategy similar to clock algorithm. */
+/* Use clock algorithm to choose a page to evict. 
+   Use the accessed bit of pagedir as "used bit". */
 struct frame* choose_page_to_evict()
 {
   struct hash_iterator iter;
-  struct hash_elem* e;
   struct frame* f;
   bool found = false;
-  while(!found)  // Use the accessed bit as "used bit".
+  while(!found)  
   {
     hash_first(&iter, &frame_table);
     while(hash_next(&iter))
     {
       f = hash_entry(hash_cur(&iter), struct frame, hash_elem);
-      if (pagedir_is_accessed(f->thr->pagedir, f->vaddr))
+      // Need to check & modify two accessed bits to handle aliases.
+      if (pagedir_is_accessed(f->thr->pagedir, f->vaddr) ||
+      pagedir_is_accessed(f->thr->pagedir, ptov((uintptr_t)f->paddr))) 
       {
         pagedir_set_accessed(f->thr->pagedir, f->vaddr, false);
+        pagedir_set_accessed(f->thr->pagedir, ptov((uintptr_t)f->paddr), false);
       }
-      else  // found a page whose used bit = 0, return true.
+      else  // Found a page whose used bit = 0, return true.
       {
         found = true;
         break;    
@@ -139,7 +143,7 @@ struct frame* page_eviction()
   
   // 3. If the evicted page is modified, write it to swap.
   if (pagedir_is_dirty(f->thr->pagedir, f->vaddr) ||
-      pagedir_is_dirty(f->thr->pagedir, ptov(f->paddr)))  // aliasing!!!!
+      pagedir_is_dirty(f->thr->pagedir, ptov((uintptr_t)f->paddr)))  // aliasing!!!!
   {
     write_to_swap(f, page_to_remove);
   }
@@ -209,15 +213,18 @@ void write_to_swap(struct frame* f, struct page* p)
   lock_release(&f->frame_entry_lock); 
 }
 
+// When a thread terminates, free the swap slots that it occupied.
 void free_swap_on_termination(struct hash_elem *e, void* aux UNUSED)
 {  
   const struct page *p = hash_entry (e, struct page, hash_elem);
   if (p->pagetype == IN_SWAP)
   {
-    bitmap_set_multiple(swap_table, p->index, 8, false);  // Mark as available.    
+    // Mark the slots as available.  
+    bitmap_set_multiple(swap_table, p->index, 8, false);   
   }
 }
 
+// Destroy swap table when pintos is shutdown.
 void destroy_swap_table(void)
 {
   bitmap_destroy(swap_table);

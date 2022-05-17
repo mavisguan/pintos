@@ -14,7 +14,6 @@
 #include "threads/vaddr.h"
 #include "userprog/syscall.h"
 #include "userprog/process.h"
-#define VM // remove later!
 #ifdef VM
 #include "vm/tables.h"
 #endif
@@ -197,7 +196,7 @@ page_fault (struct intr_frame *f)
          frame->thr = thread_current();
          lock_release(&frame->frame_entry_lock);    
       }
-      else  // use new frame.
+      else  // Use new frame.
       {
          frame = (struct frame*)malloc(sizeof(struct frame));   
          lock_init(&frame->frame_entry_lock);   
@@ -212,23 +211,27 @@ page_fault (struct intr_frame *f)
       ASSERT(kpage != NULL);
       switch (p->pagetype)
       {         
-         case IN_FILE:                  
-            pagedir_set_page(thread_current()->pagedir, upage, kpage, p->writable);  // writable=?        
-            // Load from file.
+         case IN_FILE: // Load data from file.             
+            pagedir_set_page(thread_current()->pagedir, upage, kpage, 
+                             p->writable);    
             lock_acquire(&thread_current()->page_table_lock);  
+            lock_acquire(&frame->frame_entry_lock);  
             p->pagetype = IN_PHYS_MEM;  
             p->paddr = (void*)vtop(kpage);        
             if (p->fileinfo.zeros < PGSIZE)
             {
                lock_acquire(&file_lock);               
-               file_read_at(p->fileinfo.f, kpage, PGSIZE - p->fileinfo.zeros, p->fileinfo.offset);
+               file_read_at(p->fileinfo.f, kpage, PGSIZE - p->fileinfo.zeros,
+                            p->fileinfo.offset);
                lock_release(&file_lock); 
-            }            
+            }     
+            lock_release(&frame->frame_entry_lock);       
             lock_release(&thread_current()->page_table_lock); 
             // Set last [zeros] bytes to zero.
-            memset ((uint8_t *)kpage + PGSIZE - p->fileinfo.zeros, 0, p->fileinfo.zeros);     
+            memset ((uint8_t *)kpage + PGSIZE - p->fileinfo.zeros, 0, 
+                     p->fileinfo.zeros);     
             break;
-         case ALL_ZEROS:                             
+         case ALL_ZEROS: // Simply set the whole page to zero.                           
             pagedir_set_page(thread_current()->pagedir, upage, kpage, true); 
             memset (kpage, 0, PGSIZE); 
             lock_acquire(&thread_current()->page_table_lock);  
@@ -236,13 +239,12 @@ page_fault (struct intr_frame *f)
             p->paddr = (void*)vtop(kpage);
             lock_release(&thread_current()->page_table_lock); 
             break;
-         case IN_SWAP:
+         case IN_SWAP:  // Load data from swap.
             pagedir_set_page(thread_current()->pagedir, upage, kpage, true); 
             lock_acquire(&thread_current()->page_table_lock);   
             p->pagetype = IN_PHYS_MEM;   
             p->paddr = (void*)vtop(kpage);  
-            lock_release(&thread_current()->page_table_lock);          
-            // load from swap.
+            lock_release(&thread_current()->page_table_lock);   
             read_from_swap(p->index, frame);            
             break;
          default:
